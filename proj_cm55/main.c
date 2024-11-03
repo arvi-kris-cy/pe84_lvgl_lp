@@ -47,6 +47,12 @@
 #include "timers.h"
 #endif
 
+#include "lvgl/lvgl.h"
+#include "lvgl/demos/lv_demos.h"
+#include "cy_lvgl_port.h"
+#include "cypm_utils.h"
+#include "cy_syspm.h"
+
 /*****************************************************************************
  * Macros
  *****************************************************************************/
@@ -55,10 +61,24 @@
 #define BLINKY_LED_TASK_PRIORITY            (configMAX_PRIORITIES - 1)
 #define BLINKY_LED_TASK_DELAY_MSEC          (500)
 
+#define DISPLAY_TASK_NAME                   ("Display Demo Task")
+#define DISPLAY_TASK_STACK_SIZE             (1024 * 8)  // LVGL needs more stack
+#define DISPLAY_TASK_PRIORITY               (configMAX_PRIORITIES - 1)
+#define DISPLAY_TASK_PERIOD_MS              (5)         // LVGL timer period
+
+#define DISPLAY_ACTIVE_PERIOD_MS         (10000)    // Active display time before dimming
+#define DISPLAY_REFRESH_ACTIVE_MS        (30)       // Active refresh rate
+#define DISPLAY_REFRESH_IDLE_MS          (200)      // Idle refresh rate
+#define SYSTEM_DEEP_SLEEP_MS            (5000)      // Time before entering deep sleep
+
 /*****************************************************************************
  * Function Prototypes
  *****************************************************************************/
 static void cm55_blinky_task(void * arg);
+static void display_task(void * arg);
+static void display_timer_callback(TimerHandle_t xTimer);
+static void system_sleep_timer_callback(TimerHandle_t xTimer);
+static bool system_deep_sleep_callback(cy_stc_syspm_callback_params_t *callbackParams);
 
 /*****************************************************************************
  * Function Name: main
@@ -92,13 +112,43 @@ int main(void)
     /* Enable global interrupts */
     __enable_irq();
 
+    /* Create the display activity timer */
+    display_timer = xTimerCreate("Display Timer", 
+                                pdMS_TO_TICKS(DISPLAY_ACTIVE_PERIOD_MS),
+                                pdFALSE, NULL, display_timer_callback);
+
+    /* Create the system sleep timer */
+    system_sleep_timer = xTimerCreate("Sleep Timer",
+                                    pdMS_TO_TICKS(SYSTEM_DEEP_SLEEP_MS),
+                                    pdFALSE, NULL, system_sleep_timer_callback);
+
+    /* Register deep sleep callback */
+    static cy_stc_syspm_callback_params_t callbackParams = {NULL, NULL};
+    static cy_stc_syspm_callback_t deepSleepCb = {
+        .callback = system_deep_sleep_callback,
+        .type = CY_SYSPM_DEEPSLEEP,
+        .skipMode = 0,
+        .callbackParams = &callbackParams,
+    };
+    Cy_SysPm_RegisterCallback(&deepSleepCb);
+
     /* Create the FreeRTOS Task */
     result = xTaskCreate(cm55_blinky_task, BLINKY_LED_TASK_NAME, 
                         BLINKY_LED_TASK_STACK_SIZE, NULL, 
                         BLINKY_LED_TASK_PRIORITY, NULL);
 
+    
     if( pdPASS == result )
     {
+        /* Create the Display Demo Task */
+        result = xTaskCreate(display_task, DISPLAY_TASK_NAME,
+                            DISPLAY_TASK_STACK_SIZE, NULL,
+                            DISPLAY_TASK_PRIORITY, NULL);
+
+        /* Start timers */
+        xTimerStart(display_timer, 0);
+        xTimerStart(system_sleep_timer, 0);
+
         /* Start the RTOS Scheduler */
         vTaskStartScheduler();
     }
@@ -134,6 +184,84 @@ static void cm55_blinky_task(void * arg)
         cyhal_gpio_toggle(CYBSP_LED_GREEN);
         vTaskDelay(BLINKY_LED_TASK_DELAY_MSEC);
     }
+}
+
+/*******************************************************************************
+ * Function Name: display_task
+ *******************************************************************************
+ * Summary:
+ * This task initializes the LVGL library, display, and runs the LVGL demo
+ * application. It periodically calls the LVGL timer handler to update the display.
+ *
+ * Parameters:
+ *  void * arg
+ *
+ * Return:
+ *  void
+ *******************************************************************************/
+static void display_task(void * arg)
+{
+    cy_rslt_t result;
+    CY_UNUSED_PARAMETER(arg);
+    uint32_t current_refresh_rate = DISPLAY_REFRESH_ACTIVE_MS;
+
+    /* Initialize LVGL */
+    lv_init();
+
+    /* Initialize LVGL port */
+    result = cy_lvgl_port_init();
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+
+    /* Start LVGL demo */
+    lv_demo_widgets();
+
+    for(;;)
+    {
+        /* Update refresh rate based on display state */
+        current_refresh_rate = display_active ? 
+                             DISPLAY_REFRESH_ACTIVE_MS : 
+                             DISPLAY_REFRESH_IDLE_MS;
+
+        if (!display_active)
+        {
+            /* Dim the display in inactive state */
+            // Note: Implementation depends on your display driver
+            // lv_disp_set_brightness(lv_disp_get_default(), 50);
+        }
+
+        /* Periodically call the lv_timer handler */
+        lv_timer_handler();
+        
+        /* Reset system sleep timer on any display activity */
+        if (lv_disp_get_inactive_time(NULL) < 1000)
+        {
+            xTimerReset(system_sleep_timer, 0);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(current_refresh_rate));
+    }
+}
+
+static void display_timer_callback(TimerHandle_t xTimer)
+{
+    display_active = false;
+}
+
+static void system_sleep_timer_callback(TimerHandle_t xTimer)
+{
+    /* Prepare system for deep sleep */
+    Cy_SysPm_CpuEnterDeepSleep(CY_SYSPM_WAIT_FOR_INTERRUPT);
+}
+
+static bool system_deep_sleep_callback(cy_stc_syspm_callback_params_t *callbackParams)
+{
+    /* Perform any necessary cleanup before deep sleep */
+    cyhal_gpio_write(CYBSP_LED_GREEN, CYBSP_LED_STATE_OFF);
+    
+    return true;
 }
 
 /* [] END OF FILE */
