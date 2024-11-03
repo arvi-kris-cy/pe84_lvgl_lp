@@ -29,7 +29,7 @@ MTB_TYPE=PROJECT
 # To change the target, it is recommended to use the Library manager
 # ('make library-manager' from command line), which will also update Eclipse IDE launch
 # configurations.
-TARGET=KIT_PSOCE84_EVK
+TARGET=APP_KIT_PSOCE84_EVK
 
 # Name of toolchain to use. Options include:
 #
